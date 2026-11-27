@@ -1,182 +1,165 @@
-from __future__ import annotations
-
 import csv
-from collections import defaultdict
-from pathlib import Path
-from typing import Any
+import os
 
-from models import Transaksi, format_rupiah, validasi_bulan
+from models import Transaksi, format_rupiah
 
 
 class Pencatat:
-    """Mengelola daftar transaksi, persistensi CSV, filter, ringkasan, dan ekspor."""
+    """Mengelola daftar transaksi dan penyimpanan ke file CSV."""
 
-    FIELDNAMES = ["tanggal", "kategori", "keterangan", "jenis", "nominal"]  # noqa: RUF012
+    def __init__(self, path_csv: str = "data/transaksi.csv") -> None:
+        self.path_csv = path_csv
+        self.daftar: list[Transaksi] = []
+        self._muat_csv()
 
-    def __init__(self, file_path: Path | str = "data/transaksi.csv") -> None:
-        self.file_path = Path(file_path)
-        self.transaksi: list[Transaksi] = []
-        self.peringatan_muat: list[str] = []
-        self.muat_data()
-
-    def muat_data(self) -> None:
-        """Muat transaksi dari file CSV jika tersedia."""
-        self.transaksi.clear()
-        self.peringatan_muat.clear()
-
-        if not self.file_path.exists():
+    def _muat_csv(self) -> None:
+        """Membaca data transaksi dari file CSV jika sudah ada."""
+        if not os.path.exists(self.path_csv):
             return
 
-        try:
-            with self.file_path.open("r", encoding="utf-8", newline="") as file:
-                reader = csv.DictReader(file)
-                if reader.fieldnames is None:
-                    return
-                for nomor_baris, row in enumerate(reader, start=2):
-                    try:
-                        self.transaksi.append(Transaksi.from_dict(row))
-                    except ValueError as exc:
-                        self.peringatan_muat.append(
-                            f"Baris {nomor_baris} dilewati: {exc}"
-                        )
-        except (OSError, csv.Error) as exc:
-            raise RuntimeError(
-                f"Gagal membaca file CSV '{self.file_path}': {exc}"
-            ) from exc
+        with open(self.path_csv, mode="r", newline="", encoding="utf-8") as file:
+            reader = csv.DictReader(file)
+            for i, row in enumerate(reader, start=1):
+                id_transaksi = int(row["id"]) if row.get("id") else i
+                self.daftar.append(
+                    Transaksi(
+                        id=id_transaksi,
+                        tanggal=row["tanggal"],
+                        kategori=row["kategori"],
+                        keterangan=row["keterangan"],
+                        jenis=row["jenis"],
+                        nominal=float(row["nominal"]),
+                    )
+                )
 
-    def simpan_data(self) -> None:
-        """Simpan seluruh transaksi saat ini ke file CSV."""
-        try:
-            self.file_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.file_path.open("w", encoding="utf-8", newline="") as file:
-                writer = csv.DictWriter(file, fieldnames=self.FIELDNAMES)
-                writer.writeheader()
-                for item in self.transaksi:
-                    writer.writerow(item.to_dict())
-        except (OSError, csv.Error) as exc:
-            raise RuntimeError(
-                f"Gagal menyimpan file CSV '{self.file_path}': {exc}"
-            ) from exc
+    def _simpan_csv(self) -> None:
+        """Menyimpan seluruh data transaksi ke file CSV."""
+        folder = os.path.dirname(self.path_csv)
+        if folder:
+            os.makedirs(folder, exist_ok=True)
 
-    def tambah_transaksi(self, transaksi: Transaksi) -> None:
-        """Tambahkan transaksi baru dan simpan ke CSV."""
-        self.transaksi.append(transaksi)
-        self.simpan_data()
+        fieldnames = ["id", "tanggal", "kategori", "keterangan", "jenis", "nominal"]
+        with open(self.path_csv, mode="w", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(file, fieldnames=fieldnames)
+            writer.writeheader()
+            for t in self.daftar:
+                writer.writerow(
+                    {
+                        "id": t.id,
+                        "tanggal": t.tanggal,
+                        "kategori": t.kategori,
+                        "keterangan": t.keterangan,
+                        "jenis": t.jenis,
+                        "nominal": t.nominal,
+                    }
+                )
 
-    def hapus_transaksi(self, index: int) -> Transaksi:
-        """Hapus transaksi berdasarkan indeks 0-based dan simpan perubahan."""
-        if index < 0 or index >= len(self.transaksi):
-            raise IndexError("Nomor transaksi tidak ditemukan.")
-        terhapus = self.transaksi.pop(index)
-        self.simpan_data()
-        return terhapus
+    def semua(self) -> list[Transaksi]:
+        """Mengembalikan seluruh daftar transaksi."""
+        return list(self.daftar)
 
-    def daftar_kategori(self) -> list[str]:
-        """Kembalikan daftar unik kategori yang tersimpan (urut alfabetis)."""
-        return sorted({t.kategori for t in self.transaksi}, key=str.lower)
+    def tambah(
+        self,
+        tanggal: str,
+        kategori: str,
+        keterangan: str,
+        jenis: str,
+        nominal: float,
+    ) -> Transaksi:
+        """Menambah transaksi baru dan menyimpannya ke CSV."""
+        id_baru = max((t.id for t in self.daftar), default=0) + 1
+        transaksi = Transaksi(
+            id=id_baru,
+            tanggal=tanggal,
+            kategori=kategori,
+            keterangan=keterangan,
+            jenis=jenis,
+            nominal=nominal,
+        )
+        self.daftar.append(transaksi)
+        self._simpan_csv()
+        return transaksi
 
-    def daftar_bulan(self) -> list[str]:
-        """Kembalikan daftar unik bulan YYYY-MM yang tersimpan (terbaru dulu)."""
-        return sorted({t.tanggal[:7] for t in self.transaksi}, reverse=True)
-
-    def filter_transaksi(
+    def filter(
         self, kategori: str | None = None, bulan: str | None = None
     ) -> list[Transaksi]:
-        """Filter transaksi berdasarkan kategori (case-insensitive) dan/atau bulan (YYYY-MM)."""
-        hasil = list(self.transaksi)
-
-        if kategori is not None and kategori.strip():
-            target_kategori = kategori.strip().lower()
-            hasil = [t for t in hasil if t.kategori.lower() == target_kategori]
-
-        if bulan is not None and bulan.strip():
-            target_bulan = validasi_bulan(bulan)
-            hasil = [t for t in hasil if t.tanggal.startswith(target_bulan)]
-
+        """Menyaring transaksi berdasarkan kategori dan/atau bulan (YYYY-MM)."""
+        hasil = []
+        for t in self.daftar:
+            if kategori and t.kategori.lower() != kategori.lower():
+                continue
+            if bulan and not t.tanggal.startswith(bulan):
+                continue
+            hasil.append(t)
         return hasil
 
-    def hitung_ringkasan(
-        self, transaksi_list: list[Transaksi] | None = None
-    ) -> dict[str, Any]:
-        """Hitung total pemasukan, pengeluaran, saldo, dan kategori pengeluaran terbesar."""
-        sumber = self.transaksi if transaksi_list is None else transaksi_list
-
+    def ringkasan(self, bulan: str | None = None) -> dict:
+        """Menghitung total pemasukan, pengeluaran, saldo, dan kategori terbesar."""
+        data = self.filter(bulan=bulan) if bulan else self.daftar
         total_pemasukan = 0.0
         total_pengeluaran = 0.0
-        pengeluaran_per_kategori: dict[str, float] = defaultdict(float)
+        per_kategori: dict[str, float] = {}
 
-        for item in sumber:
-            if item.jenis == "pemasukan":
-                total_pemasukan += item.nominal
+        for t in data:
+            if t.jenis == "pemasukan":
+                total_pemasukan += t.nominal
             else:
-                total_pengeluaran += item.nominal
-                pengeluaran_per_kategori[item.kategori] += item.nominal
+                total_pengeluaran += t.nominal
+                per_kategori[t.kategori] = per_kategori.get(t.kategori, 0.0) + t.nominal
 
-        kategori_terbesar: tuple[str, float] | None = None
-        if pengeluaran_per_kategori:
-            kategori_terbesar = max(
-                pengeluaran_per_kategori.items(), key=lambda pair: pair[1]
-            )
+        kategori_terbesar = None
+        nilai_terbesar = 0.0
+        for kat, total in per_kategori.items():
+            if total > nilai_terbesar:
+                nilai_terbesar = total
+                kategori_terbesar = kat
 
         return {
-            "jumlah_transaksi": len(sumber),
+            "jumlah_transaksi": len(data),
             "total_pemasukan": total_pemasukan,
             "total_pengeluaran": total_pengeluaran,
             "saldo": total_pemasukan - total_pengeluaran,
             "kategori_terbesar": kategori_terbesar,
         }
 
-    def export_ringkasan_bulanan(
-        self, bulan: str, output_dir: Path | str = "exports"
-    ) -> Path:
-        """Ekspor ringkasan dan daftar transaksi bulan tertentu (YYYY-MM) ke file .txt."""
-        bulan_valid = validasi_bulan(bulan)
-        daftar = self.filter_transaksi(bulan=bulan_valid)
-        ringkasan = self.hitung_ringkasan(daftar)
+    def hapus(self, id_target: int) -> bool:
+        """Menghapus transaksi berdasarkan ID. Mengembalikan True jika berhasil."""
+        for i, t in enumerate(self.daftar):
+            if t.id == id_target:
+                self.daftar.pop(i)
+                self._simpan_csv()
+                return True
+        return False
 
-        target_dir = Path(output_dir)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        output_path = target_dir / f"ringkasan_{bulan_valid}.txt"
+    def export_bulanan(self, bulan: str) -> str:
+        """Mengekspor ringkasan dan daftar transaksi bulan tertentu ke file .txt."""
+        os.makedirs("exports", exist_ok=True)
+        path_file = os.path.join("exports", f"ringkasan_{bulan}.txt")
 
-        garis = "=" * 64
-        sub_garis = "-" * 64
-        kategori_info = (
-            f"{ringkasan['kategori_terbesar'][0]} "
-            f"({format_rupiah(ringkasan['kategori_terbesar'][1])})"
-            if ringkasan["kategori_terbesar"]
-            else "-"
-        )
+        data = self.ringkasan(bulan=bulan)
+        daftar = self.filter(bulan=bulan)
 
-        lines = [
-            garis,
-            f"RINGKASAN KEUANGAN BULANAN ({bulan_valid})",
-            garis,
-            f"Jumlah Transaksi            : {ringkasan['jumlah_transaksi']}",
-            f"Total Pemasukan             : {format_rupiah(ringkasan['total_pemasukan'])}",
-            f"Total Pengeluaran           : {format_rupiah(ringkasan['total_pengeluaran'])}",
-            f"Saldo                       : {format_rupiah(ringkasan['saldo'])}",
-            f"Kategori Pengeluaran Terbesar: {kategori_info}",
-            sub_garis,
-            "DAFTAR TRANSAKSI",
-            sub_garis,
+        baris = [
+            f"=== Ringkasan Keuangan Bulan {bulan} ===",
+            f"Jumlah Transaksi     : {data['jumlah_transaksi']}",
+            f"Total Pemasukan      : {format_rupiah(data['total_pemasukan'])}",
+            f"Total Pengeluaran    : {format_rupiah(data['total_pengeluaran'])}",
+            f"Saldo                : {format_rupiah(data['saldo'])}",
+            f"Pengeluaran Terbesar : {data['kategori_terbesar'] or '-'}",
+            "",
+            "--- Daftar Transaksi ---",
         ]
 
         if not daftar:
-            lines.append("Tidak ada transaksi pada bulan ini.")
+            baris.append("Tidak ada transaksi pada bulan ini.")
         else:
-            for idx, item in enumerate(daftar, start=1):
-                lines.append(
-                    f"{idx:>2}. [{item.tanggal}] {item.jenis.upper():<11} | "
-                    f"{item.kategori} | {item.keterangan} | {format_rupiah(item.nominal)}"
+            for t in daftar:
+                baris.append(
+                    f"[{t.id}] {t.tanggal} | {t.jenis:<11} | {t.kategori} | "
+                    f"{t.keterangan} | {format_rupiah(t.nominal)}"
                 )
 
-        lines.append(garis)
+        with open(path_file, mode="w", encoding="utf-8") as file:
+            file.write("\n".join(baris) + "\n")
 
-        try:
-            output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        except OSError as exc:
-            raise RuntimeError(
-                f"Gagal menulis file ekspor '{output_path}': {exc}"
-            ) from exc
-
-        return output_path
+        return path_file
